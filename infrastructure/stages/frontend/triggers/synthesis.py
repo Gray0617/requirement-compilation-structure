@@ -3,7 +3,7 @@
 import json
 
 from infrastructure.stages.frontend.triggers.prompts import INSTRUCTIONS
-from infrastructure.stages.frontend.triggers.design import apply_decomposition, empty_triggers, relevant_pages, trigger_obligations, api_ids, validate_coverage
+from infrastructure.stages.frontend.triggers.design import apply_decomposition, empty_triggers, normalize_proposal, relevant_pages, trigger_obligations, api_ids, validate_coverage
 from infrastructure.stages.frontend.ui.design import data_symbols
 from infrastructure.utils.files import save_json, read_artifact
 from infrastructure.stages.database.obligations.records import normalize_obligations
@@ -47,8 +47,11 @@ def synthesize_triggers(arc_dir, ui, tree, backend, contexts, model, console, ma
                 "shared_conventions": select_conventions(conventions, requirements=[rid]),
                 "existing_triggers": existing, "backend_apis": {aid: backend["apis"][aid] for aid in aids}}
             def accept(proposal):
-                for sid in tree.own_steps[rid]:
-                    proposal["step_triggers"][sid]
+                proposal = normalize_proposal(proposal)
+                missing = [sid for sid in tree.own_steps[rid] if sid not in proposal["step_triggers"]]
+                if missing:
+                    raise ValueError("step_triggers must map every current scenario step; missing: "
+                        + ", ".join(missing))
                 updated = apply_decomposition(result, proposal, rid)
                 validate_coverage(updated, backend, obligations, tree, [*accepted, rid])
                 derived = {tid: trigger_obligations(updated["triggers"][tid], backend)

@@ -3,6 +3,73 @@
 from copy import deepcopy
 
 
+# Design element type -> browser role that an acceptance suite queries.
+ROLE_BY_TYPE = {"button": "button", "link": "link", "checkbox": "checkbox", "radio": "radio",
+    "radiogroup": "radiogroup", "heading": "heading", "alert": "alert",
+    "select": "combobox", "input": "textbox", "image": "img"}
+
+
+# Native input types whose controls expose a predictable implicit browser role.
+TEXTBOX_INPUT_TYPES = {"text", "email", "number", "search", "tel", "url", "date", "time",
+    "datetime-local", "month", "week"}
+
+
+def element_role(node: dict) -> str | None:
+    """Return the browser role an acceptance suite would query for this element.
+
+    An input whose ``input_type`` is not declared has no predictable role: it may
+    be a concealed password field (no implicit role) or a text box. Returning
+    None there keeps the conformance suite from asserting a role the design never
+    promised, still checking the accessible name.
+    """
+    declared = (node.get("prop") or {}).get("role")
+    if isinstance(declared, str) and declared.strip():
+        # A requirement may state a role the element type does not imply, such as
+        # "Book list"(role=region); prop.role carries that explicit declaration.
+        return declared.strip().lower()
+    kind = node.get("type")
+    if kind == "input":
+        input_type = (node.get("prop") or {}).get("input_type")
+        if input_type in {"password", None}:
+            return None
+        if input_type in {"radio", "checkbox"}:
+            return input_type
+        if input_type in TEXTBOX_INPUT_TYPES:
+            return "textbox"
+        return None
+    return ROLE_BY_TYPE.get(kind)
+
+
+def accessible_name(node: dict) -> str | None:
+    """Return the static accessible name a design element promises, if any."""
+    prop = node.get("prop") or {}
+    kind = node.get("type")
+    keys = ("label", "placeholder") if kind in {"input", "select"} else ("text", "label", "alt")
+    for key in keys:
+        value = prop.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+# Containers whose children legitimately repeat one control: a table row of Delete
+# buttons or a list of links. Name-uniqueness rules skip their subtrees.
+REPEATED_CONTAINERS = {"list", "item", "table"}
+
+
+def in_repeated_container(design: dict, uid: str) -> bool:
+    """Return True when an ancestor is a list, table or item container."""
+    elements = design.get("elements") or {}
+    current = (elements.get(uid) or {}).get("parent")
+    seen = set()
+    while current and current in elements and current not in seen:
+        seen.add(current)
+        node = elements[current] or {}
+        if node.get("type") in REPEATED_CONTAINERS:
+            return True
+        current = node.get("parent")
+    return False
+
 
 INSTRUCTIONS = """Design the UI elements and frontend data declarations for the current requirement.
 Use requirement scenarios and visual references; reuse supplied UI elements where appropriate.
@@ -13,8 +80,14 @@ OUTPUT CONTRACT
 Return one JSON object with four sibling keys: elements, pages, requirement_ui, step_ui.
 elements maps ELEMENT IDs to {type, parent, mode, data, prop}. A page root has type
 "page" and parent=null. Other elements reference a parent ELEMENT ID. Use ordinary types:
-container, form, input, checkbox, select, button, text, heading, link, list, item, image,
-alert or table. mode is an array containing user_read and/or user_write, or [].
+container, form, input, checkbox, radio, radiogroup, select, button, text, heading, link,
+list, item, image, alert or table. Use an input_type of text, email, password, number, date,
+tel, search, url, radio or checkbox when the control's browser behaviour matters. Choose the
+control type the requirement's own wording implies (a named role such as link, button,
+combobox, checkbox, radio or alert), and otherwise the most conventional control for that
+data; keep the element's stated name exact either way. A grouped single choice is a
+radiogroup element with labelled radio children. mode is an array containing user_read
+and/or user_write, or [].
 
 data is an array of variable declarations: {var, dtype, constraints}.
 var is the frontend variable name; dtype is string, integer, number, boolean, array,
@@ -35,6 +108,27 @@ wording in the existing element.prop; do not create a separate naming registry.
 Explicit requirement wording takes precedence over visual-reference examples. Only choose
 wording freely when it is unspecified or alternatives are explicitly allowed. Business
 record names and user-entered values remain dynamic; example data is not fixed UI wording.
+
+Interactive controls on one page must have distinct accessible names, because automated
+checks locate a control by its role and exact name. A navigation link, a breadcrumb link
+and a heading that all read "Books" make that lookup ambiguous and break the check, so keep
+the one the requirement asks for and give any other a distinguishing accessible name (for
+example "Books breadcrumb") or omit it. Controls that legitimately repeat inside a list,
+table or item container are exempt from this rule.
+
+When the requirement annotates a name with a role, as in "Book list"(role=region), the
+element must expose that exact name and that exact role: pick the element type whose role
+matches, and for a container or region set prop.role to the stated role. An annotated name
+is a contract, not a description.
+
+The application renders one shared navigation on every page, so its link names are already
+taken. A page-local element must not repeat a navigation link's role and accessible name:
+a breadcrumb that reads "Books" beside a navigation "Books" link breaks every role-and-name
+lookup on that page. Give it a distinguishing name such as "Books breadcrumb", or omit it.
+
+A name written with braces, such as "Pin {title}" or "{title} pinned note", is a template:
+the rendered control must interpolate the row's own value ("Pin Groceries"), never the
+literal braces. Use the same placeholder spelling the requirement uses.
 
 pages maps PAGE IDs to {name, route, root, images}. route is a URL path, root is an
 ELEMENT ID and images lists supplied image IDs. Preserve explicit image.page hints.

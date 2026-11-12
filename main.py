@@ -1,6 +1,7 @@
 """Compile a requirement directory into an executable application."""
 
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -10,27 +11,53 @@ from infrastructure.utils.presentation.logging import configure_console
 from infrastructure.utils.presentation.stages import stage_label
 
 
+def platform_default(value: Path | None, *names: str) -> Path | None:
+    """Fall back to the runner-provided directory variables when no argument is given."""
+    if value is not None:
+        return value
+    for name in names:
+        candidate = os.environ.get(name, "").strip()
+        if candidate:
+            return Path(candidate)
+    return None
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Read public options and validate paths and the backend port before compilation."""
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Stages:\n" + "\n".join(
             "  " + stage_label(name) + f"  (--stage {name})" for name, _, _ in PIPELINE))
-    parser.add_argument("requirement_path", type=Path,
-        help="Requirement directory containing requirements.yaml and reference assets")
-    parser.add_argument("-o", "--output-dir", type=Path, required=True,
-        help="Directory for the generated application and .arc artifacts")
+    parser.add_argument("requirement_path", type=Path, nargs="?",
+        help="Requirement directory containing requirements.yaml and reference assets; "
+            "defaults to ARCBENCH_TASK_DIR/ARCBENCH_REQUIREMENT_DIR")
+    parser.add_argument("-o", "--output-dir", type=Path,
+        help="Directory for the generated application and .arc artifacts; "
+            "defaults to ARCBENCH_OUTPUT_DIR/ARCBENCH_PROJECT_DIR")
+    parser.add_argument("--type", "--app-type", dest="app_type",
+        default=os.environ.get("ARCBENCH_TASK_TYPE", "web").strip() or "web",
+        choices=["web", "cli", "android"],
+        help="Application type reported by the runner; this compiler only builds web applications")
     parser.add_argument("--model-log", "--debug-model-io", dest="model_log", action="store_true",
         help="Show detailed model I/O and save per-call prompt/response logs; usage and timing are always shown")
-    parser.add_argument("--port", type=int, default=3000,
-        help="Default generated backend port and frontend API proxy target (default: 3000)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "3000") or 3000),
+        help="Default generated backend port and frontend API proxy target (default: PORT or 3000)")
     parser.add_argument("--stage", choices=[name for name, _, _ in PIPELINE], metavar="STAGE",
         help="Run one stage by its full name (e.g. 06_implement_backend_tdd); omit for the full pipeline")
     parser.add_argument("--pause", action="store_true", help="Wait for Enter after each display stage")
     args = parser.parse_args(argv)
+    args.requirement_path = platform_default(args.requirement_path,
+        "ARCBENCH_TASK_DIR", "ARCBENCH_REQUIREMENT_DIR")
+    args.output_dir = platform_default(args.output_dir, "ARCBENCH_OUTPUT_DIR", "ARCBENCH_PROJECT_DIR")
     try:
+        if args.app_type != "web":
+            raise ValueError(f"This compiler only builds web applications, not {args.app_type}")
         if not 1 <= args.port <= 65535:
             raise ValueError("--port must be between 1 and 65535")
+        if args.requirement_path is None:
+            raise ValueError("Provide the requirement directory, or set ARCBENCH_TASK_DIR")
+        if args.output_dir is None:
+            raise ValueError("Provide --output-dir, or set ARCBENCH_OUTPUT_DIR")
         args.requirement_path, args.output_dir = resolve_directories(
             argparse.Namespace(input=args.requirement_path, output=args.output_dir))
         if not args.requirement_path.is_dir():

@@ -15,7 +15,7 @@ from infrastructure.shared.project.entrypoints import selected_path
 from infrastructure.stages.frontend.triggers.e2e_runtime import CONFIG, FIXTURE, prepare_e2e
 from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS, prepare_frontend
-from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
+from infrastructure.stages.frontend.ui.testing import FrontendChecks, existing_suites, require_green
 from infrastructure.stages.backend.context import related_schema
 from infrastructure.stages.backend.testing import BackendChecks, require_green as require_backend_green
 from infrastructure.stages.frontend.triggers.design import api_ids, trigger_obligations
@@ -230,8 +230,7 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
         file_roots=("frontend/src", "frontend/tests", "backend/src", "backend/tests"))
     report["status"] = "IMPLEMENTING"
     save_json(arc_dir / "frontend_e2e.json", report)
-    baseline_files = [ui_test_path(pid) for pid in ui["pages"]
-        if (output / ui_test_path(pid)).is_file()]
+    baseline_files = existing_suites(output, ui["pages"])
 
     def baseline_gate():
         """Check inherited sources independently of the next business requirement."""
@@ -286,7 +285,7 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             continue
         targets = tids
         relative = test_path(rid, output)
-        ui_files = [ui_test_path(pid) for pid in pages if (output / ui_test_path(pid)).is_file()]
+        ui_files = existing_suites(output, pages)
         called = {aid for trigger in context["triggers"].values() for aid in api_ids(trigger)}
         context["obligations"] = {tid: trigger_obligations(trigger, backend) for tid, trigger in context["triggers"].items()}
         context.update({"requirement": contexts[rid],
@@ -432,7 +431,7 @@ def verify_frontend(arc_dir, tree, backend, ui, console, report):
     files = [test_path(rid, output) for rid in tree.leaves
         if report["requirements"].get(rid, {}).get("status") != "NO_TRIGGERS"
         and (output / test_path(rid, output)).is_file()]
-    ui_files = [ui_test_path(pid) for pid in ui["pages"] if (output / ui_test_path(pid)).is_file()]
+    ui_files = existing_suites(output, ui["pages"])
     api_checks = BackendChecks(output)
     api_files = [path for aid in backend["apis"]
         if (path := selected_path(output, "backend_test", aid)) and (output / path).is_file()]

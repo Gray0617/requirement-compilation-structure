@@ -3,14 +3,40 @@
 from pathlib import Path
 import subprocess
 from threading import Thread
+from time import sleep
 
 from infrastructure.utils.processes import npm_command, start_process, stop_process
 
+# A registry hiccup or a locked cache file must not cost an entire compilation
+# pass; the workspace is still usable when node_modules is already populated.
+INSTALL_ATTEMPTS = 2
+RETRY_DELAY_SECONDS = 3
+
 
 def install_dependencies(output_dir: Path) -> None:
-    """Run npm install in the generated workspace, stream its output, and fail on timeout or nonzero exit."""
+    """Run npm install in the generated workspace, retrying once, then fail on a missing install."""
     if not (output_dir / "package.json").is_file():
         raise ValueError("Run main.py --stage 00 before installing project dependencies")
+    failure = None
+    for attempt in range(1, INSTALL_ATTEMPTS + 1):
+        try:
+            _install_once(output_dir)
+            return
+        except RuntimeError as error:
+            failure = error
+            if attempt < INSTALL_ATTEMPTS:
+                print(f"[npm] install failed ({error}); retrying in {RETRY_DELAY_SECONDS}s", flush=True)
+                sleep(RETRY_DELAY_SECONDS)
+    # An existing node_modules keeps every later check runnable even when the
+    # registry is unreachable for this attempt.
+    if (output_dir / "node_modules").is_dir():
+        print(f"[npm] install is still failing; continuing with the existing node_modules: {failure}", flush=True)
+        return
+    raise failure
+
+
+def _install_once(output_dir: Path) -> None:
+    """Run one `npm install --include=dev --no-audit --no-fund` and raise on a nonzero exit."""
     command = npm_command()
     print(f"Installing dependencies in {output_dir}: npm install --include=dev --no-audit --no-fund", flush=True)
     with start_process(

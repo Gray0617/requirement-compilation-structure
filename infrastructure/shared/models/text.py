@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from time import sleep
 
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
@@ -10,6 +11,36 @@ from infrastructure.utils.presentation.model_io import http_client, invoke
 
 
 DEFAULT_MODEL = "deepseek-flash"
+
+# Edit rounds receive a machine-generated failure report and answer with tool calls,
+# so they are mechanical. Measured runs spent 95% of every output token thinking
+# there. Only these rounds default to no thinking; planning stages keep theirs, and
+# MODEL_REASONING_FILES=low restores the previous behaviour without a code change.
+DEFAULT_FILE_REASONING = "none"
+
+# A provider outage, rate limit or gateway error is not a wrong answer. Retrying a
+# few times keeps one bad window from discarding an otherwise complete compilation.
+TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504}
+# Connection-level failures have no status code; status errors are classified by
+# their code so that a 400/401/404 is never retried.
+TRANSIENT_TYPES = {"APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout",
+    "ReadTimeout", "WriteTimeout", "PoolTimeout", "RemoteProtocolError"}
+MODEL_ATTEMPTS = max(1, int(os.getenv("MODEL_ATTEMPTS", "4") or 4))
+BACKOFF_SECONDS = max(0.0, float(os.getenv("MODEL_BACKOFF_SECONDS", "2") or 2))
+
+
+class ModelUnavailable(RuntimeError):
+    """The provider stayed unavailable; work must stop rather than be re-planned."""
+
+
+def transient_failure(error) -> bool:
+    """Return True when retrying the same request could succeed."""
+    if getattr(error, "status_code", None) in TRANSIENT_STATUS:
+        return True
+    for kind in type(error).__mro__:
+        if kind.__name__ in TRANSIENT_TYPES:
+            return True
+    return False
 
 JSON_OUTPUT_RULE = """OUTPUT PROTOCOL: return exactly one valid JSON object in the response content.
 The first non-whitespace character must be { and the last must be }.
@@ -62,6 +93,13 @@ class TextModel:
         self.reasoning = os.getenv("MODEL_REASONING", "low").lower()
         if self.reasoning not in {"auto", "provider", "none", "low", "high", "max"}:
             raise ValueError("MODEL_REASONING must be auto, provider, none, low, high or max")
+        # Edit rounds already receive a precise failure report, so thinking there is
+        # optional: MODEL_REASONING_FILES=low restores it when accuracy matters more
+        # than cost, while the default keeps the measured-cheaper behaviour.
+        self.file_reasoning = (os.getenv("MODEL_REASONING_FILES", DEFAULT_FILE_REASONING).lower()
+            or self.reasoning)
+        if self.file_reasoning not in {"auto", "provider", "none", "low", "high", "max"}:
+            raise ValueError("MODEL_REASONING_FILES must be auto, provider, none, low, high or max")
         self._reasoning_supported = True
         self.json_mode = json_mode
         self._token_parameter = "max_completion_tokens"
@@ -72,7 +110,7 @@ class TextModel:
             http_client=http_client(),
         )
 
-    def _request(self, **arguments):
+    def _request_once(self, **arguments):
         """Apply one output budget to JSON calls, with legacy endpoint compatibility."""
         while True:
             options = dict(arguments)
@@ -94,9 +132,37 @@ class TextModel:
                     continue
                 raise
 
-    def generate_json(self, instructions: str, payload: dict) -> dict:
+    def _request(self, **arguments):
+        """Retry transient provider failures, then report a bounded unavailability."""
+        delay = BACKOFF_SECONDS
+        for attempt in range(1, MODEL_ATTEMPTS + 1):
+            try:
+                return self._request_once(**arguments)
+            except OpenAIError as error:
+                if not transient_failure(error):
+                    raise
+                if attempt >= MODEL_ATTEMPTS:
+                    raise ModelUnavailable(
+                        f"provider unavailable after {MODEL_ATTEMPTS} attempts: {error}") from error
+                print(f"[model] transient provider failure ({type(error).__name__}: {error}); "
+                    f"retry {attempt}/{MODEL_ATTEMPTS} in {delay:.1f}s", flush=True)
+                sleep(delay)
+                delay *= 2
+        raise ModelUnavailable(f"provider unavailable after {MODEL_ATTEMPTS} attempts")
+
+    def generate_file_json(self, instructions: str, payload: dict) -> dict:
+        """Request one edit-round response without long hidden reasoning.
+
+        Edit rounds carry a precise, machine-generated failure report and return
+        tool calls, so they are mechanical work. Measured runs spent 95% of every
+        output token on thinking here and gained no accuracy from it.
+        """
+        return self.generate_json(instructions, payload,
+            reasoning=getattr(self, "file_reasoning", "none"))
+
+    def generate_json(self, instructions: str, payload: dict, reasoning: str | None = None) -> dict:
         """Request JSON using the stage prompt and serialized task data."""
-        mode = getattr(self, "reasoning", "low")
+        mode = reasoning or getattr(self, "reasoning", "low")
         try:
             response = self._request(
                 model=self.name,

@@ -15,11 +15,17 @@ from infrastructure.stages.backend.testing import BackendChecks, require_green a
 from infrastructure.stages.requirements.tree import RequirementTree
 from infrastructure.stages.frontend.triggers.implementation import scenario_context, IMPLEMENT_INSTRUCTIONS, editable_runtime_path, test_run_status
 from infrastructure.stages.frontend.triggers.e2e_runtime import FIXTURE
+
+# Measured on a real run: acceptance-test authoring spent more model calls than the
+# implementation it verifies, and its late rounds re-tried the same assertion. Keep a
+# productive ceiling for authoring while the repair pass keeps its full budget.
+TEST_AUTHORING_TURNS = 6
+TEST_REVIEW_TURNS = 3
 from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure
 from infrastructure.stages.frontend.triggers.design import api_ids
 from infrastructure.stages.frontend.ui.runtime import APPLICATION_ENTRYPOINTS
-from infrastructure.stages.frontend.ui.testing import FrontendChecks, require_green, test_path as ui_test_path
+from infrastructure.stages.frontend.ui.testing import FrontendChecks, existing_suites, require_green
 from infrastructure.utils.files import save_json
 from infrastructure.shared.project.git import checkpoint
 
@@ -139,8 +145,12 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 return result
 
             if not (output / path).is_file():
+                # Acceptance-test authoring consumed more calls than the implementation
+                # itself. Its first rounds are productive and later ones mostly retry the
+                # same assertion, so bound them; the repair pass below keeps its full
+                # budget because that is where real defects get fixed.
                 agent = run_file_agent(model, INSTRUCTIONS, task, workspace, compile_suite,
-                    max_turns, console, label + ' / Generation')
+                    min(max_turns, TEST_AUTHORING_TURNS), console, label + ' / Generation')
                 entry['generation_turns'] = agent['turns']
             result = checks.tests([path])
             entry["result"] = result
@@ -154,7 +164,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 checkpoint(output, stage="10", task=rid, action="Record independent acceptance before test review",
                     status="FAILED", details={"test_path": path, "checks": result})
                 review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
-                    max_turns, console, label + ' / Test review', feedback=result)
+                    min(max_turns, TEST_REVIEW_TURNS), console, label + ' / Test review', feedback=result)
                 entry['review_turns'] = review['turns']
                 result = checks.tests([path])
                 entry["result"] = result
@@ -165,8 +175,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 process_files = [test_path(key, output) for key in process_ids
                     if (output / test_path(key, output)).is_file()]
                 acceptance_files = [acceptance_path(key) for key in [*accepted, rid]]
-                ui_files = [ui_test_path(pid) for pid in ui['pages']
-                    if (output / ui_test_path(pid)).is_file()]
+                ui_files = existing_suites(output, ui['pages'])
                 repair_task = {**task, **context, 'requirement': task['original_requirement'],
                     'backend_apis': apis, 'target_trigger_ids': sorted(context['triggers']),
                     'repair_reason': 'final_verification_and_acceptance' if pending_verification else 'independent_acceptance',

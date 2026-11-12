@@ -35,8 +35,11 @@ class SourceFiles:
             if (relative := selected_path(self.output, kind, identity)) is not None}
 
     def is_test(self, relative):
-        """Identify generated suites, leaving shared fixtures and test utilities read-only."""
-        return "/tests/e2e/acceptance/" not in relative and relative.startswith(self.tests_root + "/") and relative.endswith((".spec.ts", ".test.ts"))
+        """Identify generated suites, leaving shared fixtures and the a11y gate read-only."""
+        return ("/tests/e2e/acceptance/" not in relative
+            and not relative.endswith(".a11y.spec.ts")
+            and relative.startswith(self.tests_root + "/")
+            and relative.endswith((".spec.ts", ".test.ts")))
 
     def include(self, workspace, paths):
         """Add selected files plus transitive local imports, preserving write protection."""

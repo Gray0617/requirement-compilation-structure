@@ -7,12 +7,18 @@ components. Prompts and design records live in ui/design.py."""
 import json
 
 from infrastructure.stages.frontend.ui.design import INSTRUCTIONS, apply_proposal, empty_design, page_elements, normalize_design, page_context, UIResponseError, data_symbols
+from infrastructure.stages.frontend.ui.contract import ObservableContractError, contract_gaps, observable_contract
 from infrastructure.stages.frontend.ui.proposals import INSTRUCTIONS as EXAMPLE_INSTRUCTIONS
 from infrastructure.shared.rag.pages import PageRetriever
 from infrastructure.utils.files import save_json
 from infrastructure.shared.agent.proposals import propose_json
 from infrastructure.shared.agent.tasks import TaskFailures
 from infrastructure.shared.agent.discovery import ContextIndex
+
+# An explicit requirement wording/role gap receives a bounded number of design
+# repair attempts. Afterwards the accepted design keeps a recorded gap instead of
+# failing the requirement, so an imperfect extractor never costs a whole page.
+MAX_CONTRACT_REPAIRS = 2
 
 
 def bind_requirement_image_pages(design, requirement, rid):
@@ -57,7 +63,9 @@ def synthesize_ui(arc_dir, tree, images, contexts, model, console, top_k=3, max_
                 design["steps"][sid] = []
             console.show(f"{rid} | Skip non-leaf UI/data analysis", "Only leaf requirements are analyzed. Organizational parents do not generate or inherit UI nodes.")
     failures = TaskFailures(arc_dir, "07_design_ui", console)
+    contract_report = {}
     save_json(arc_dir / "ui_design.json", design)
+    save_json(arc_dir / "observable_contract.json", contract_report)
     for number, rid in enumerate(tree.leaves, 1):
         with failures.task(rid):
             requirement = contexts[rid]
@@ -71,6 +79,8 @@ def synthesize_ui(arc_dir, tree, images, contexts, model, console, top_k=3, max_
                 "all_pages": {pid: {key: page[key] for key in ("name", "route", "root", "images")}
                     for pid, page in design["pages"].items() if pid in retrieved["pages"]},
             }
+            contract = observable_contract(requirement)
+            state = {"repairs": 0, "gaps": []}
             def accept(proposal):
                 try:
                     updated = apply_proposal(design, proposal, rid, tree)
@@ -79,16 +89,28 @@ def synthesize_ui(arc_dir, tree, images, contexts, model, console, top_k=3, max_
                 bind_requirement_image_pages(updated, requirement, rid)
                 for pid in proposal["pages"]:
                     console.show(label + f" | Page context {pid}", json.dumps(page_context(updated, pid), ensure_ascii=False, indent=2))
+                state["gaps"] = contract_gaps(updated, rid, contract,
+                    created_pages=list(proposal.get("pages", {})))
+                if state["gaps"] and state["repairs"] < MAX_CONTRACT_REPAIRS:
+                    state["repairs"] += 1
+                    raise ObservableContractError(rid, state["gaps"])
                 return updated
 
             updated, proposal = propose_json(model, INSTRUCTIONS + "\n\n" + EXAMPLE_INSTRUCTIONS,
                 request, accept, console, label, max_attempts, context_index=ContextIndex(lambda: {"page": design["pages"], "ui_element": design["elements"], "ui_data": data_symbols(design["elements"])}))
             console.show(label + " | 4. Incremental UI/data changes", json.dumps(proposal, ensure_ascii=False, indent=2))
+            contract_report[rid] = {"contract": contract, "gaps": state["gaps"],
+                "repair_attempts": state["repairs"]}
+            save_json(arc_dir / "observable_contract.json", contract_report)
+            if state["gaps"]:
+                console.show(label + " | Observable contract gaps accepted",
+                    "\n".join(gap["message"] for gap in state["gaps"]))
             design = updated
             save_json(arc_dir / "ui_design.json", design)
             console.artifact("ui_design", design, label + " | Accepted UI")
     failures.finish()
     normalize_design(design, tree)
     save_json(arc_dir / "ui_design.json", design)
+    save_json(arc_dir / "observable_contract.json", contract_report)
     console.show("UI/data design complete for ALL requirements", f"Saved {arc_dir / 'ui_design.json'}\nRun main.py --stage 08 for existence tests and UI implementation. Interactions belong to step 09.")
     return design

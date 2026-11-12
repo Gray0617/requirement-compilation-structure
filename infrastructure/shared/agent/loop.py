@@ -1,6 +1,7 @@
 """Bounded file editing with failure attribution and real acceptance checks."""
 
 import json
+import re
 
 from infrastructure.shared.agent.discovery import DISCOVERY_RULES, DiscoverySession
 from infrastructure.shared.agent.conventions import task_conventions
@@ -8,17 +9,39 @@ from infrastructure.shared.agent.conventions import task_conventions
 from infrastructure.shared.agent.tools import FileTools
 from infrastructure.shared.agent.tools.protocol import FILE_TOOL_RULES
 from infrastructure.shared.agent.proposals import RESPONSE_ERRORS, response_feedback
+from infrastructure.shared.models.text import ModelUnavailable
 from infrastructure.shared.project.git import checkpoint
 from infrastructure.utils.files import read_source
+
+# The same acceptance failure twice in a row means the repair is not converging.
+# Stopping there costs one round instead of the remaining budget; a real ARC-Bench
+# run repeated one TypeScript error for eight rounds while the wall clock ran out.
+NO_PROGRESS_REPEATS = 2
+
+_ANSI = re.compile(r"(?:\\u001b|\x1b)\[[0-9;]*m")
 
 
 class AgentExhausted(ValueError):
     """A recoverable task failure with the last real repair feedback."""
 
-    def __init__(self, label, turns, feedback):
-        super().__init__(f"Agent exhausted {turns} rounds for {label}")
+    def __init__(self, label, turns, feedback, reason=None):
+        self.reason = reason
+        detail = f" ({reason})" if reason else ""
+        super().__init__(f"Agent exhausted {turns} rounds for {label}{detail}")
         self.turns = turns
         self.feedback = feedback
+
+
+def failure_fingerprint(feedback) -> str:
+    """Reduce one rejection to a stable key so repeats are recognisable."""
+    text = json.dumps(feedback, ensure_ascii=False, sort_keys=True, default=str)
+    # The JSON text carries escaped newlines/tabs and escaped escape sequences.
+    for escaped in ("\\n", "\\t", "\\r"):
+        text = text.replace(escaped, " ")
+    text = _ANSI.sub("", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\b\d+(?:\.\d+)?\s*(?:ms|s)\b", "<time>", text)
+    return text[:4000]
 
 
 def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
@@ -37,6 +60,7 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
     read_files = {}
     feedback = [] if feedback is None else [feedback_filter(feedback) if feedback_filter else feedback]
     check_feedback = list(feedback)
+    last_fingerprint, repeats = None, 0
     for turn in range(1, max_turns + 1):
         console.show(f"{label} | Edit round {turn}/{max_turns}",
             "Generate file edits, then run the stage's compilation and test acceptance checks.")
@@ -73,7 +97,12 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
                     rules += "\n\n" + DISCOVERY_RULES
                 else:
                     rules += "\nSemantic discovery is disabled for this task. Use supplied evidence and read_file only."
-                return model.generate_json(rules, request)
+                # Edit rounds apply a precise failure report mechanically, so a
+                # transport that can skip hidden reasoning is preferred. The check
+                # looks at the class: test doubles synthesize attributes on access.
+                transport = (model.generate_file_json
+                    if hasattr(type(model), "generate_file_json") else model.generate_json)
+                return transport(rules, request)
             response = request_model()
             while isinstance(response, dict):
                 if "context_request" in response:
@@ -134,6 +163,10 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
             checkpoint(files.output, task=label, action=f"Accept edit round {turn}",
                 details={"round": turn, "checks": checks})
             return {"turns": turn, "checks": checks}
+        except ModelUnavailable:
+            # A provider outage is not a wrong answer: do not spend edit rounds
+            # re-planning work the model never reviewed.
+            raise
         except (*RESPONSE_ERRORS, RuntimeError, OSError) as error:
             message = str(error)
             console.show(f"{label} | Repair feedback", message)
@@ -149,4 +182,15 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
                 feedback = [*check_feedback, rejected]
             checkpoint(files.output, task=label, action=f"Reject edit round {turn}", status="REJECTED",
                 details={"round": turn, "applied": applied, "feedback": feedback})
+            fingerprint = failure_fingerprint(rejected)
+            repeats = repeats + 1 if fingerprint == last_fingerprint else 1
+            last_fingerprint = fingerprint
+            if repeats >= NO_PROGRESS_REPEATS:
+                console.show(f"{label} | Stop repeating the same failure",
+                    f"The same acceptance failure occurred {repeats} times; stopping instead of "
+                    f"repeating the remaining rounds.\n{message}")
+                checkpoint(files.output, task=label, action="Stop a non-converging repair",
+                    status="FAILED", details={"round": turn, "repeats": repeats, "feedback": feedback})
+                raise AgentExhausted(label, turn, feedback,
+                    reason=f"no progress: the same failure repeated {repeats} times") from error
     raise AgentExhausted(label, max_turns, feedback)
