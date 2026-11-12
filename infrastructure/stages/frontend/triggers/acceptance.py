@@ -15,12 +15,6 @@ from infrastructure.stages.backend.testing import BackendChecks, require_green a
 from infrastructure.stages.requirements.tree import RequirementTree
 from infrastructure.stages.frontend.triggers.implementation import scenario_context, IMPLEMENT_INSTRUCTIONS, editable_runtime_path, test_run_status
 from infrastructure.stages.frontend.triggers.e2e_runtime import FIXTURE
-
-# Measured on a real run: acceptance-test authoring spent more model calls than the
-# implementation it verifies, and its late rounds re-tried the same assertion. Keep a
-# productive ceiling for authoring while the repair pass keeps its full budget.
-TEST_AUTHORING_TURNS = 6
-TEST_REVIEW_TURNS = 3
 from infrastructure.stages.frontend.triggers.testing import E2EChecks, test_path
 from infrastructure.stages.frontend.triggers.scope import TriggerCheckFailure
 from infrastructure.stages.frontend.triggers.design import api_ids
@@ -150,7 +144,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 # same assertion, so bound them; the repair pass below keeps its full
                 # budget because that is where real defects get fixed.
                 agent = run_file_agent(model, INSTRUCTIONS, task, workspace, compile_suite,
-                    min(max_turns, TEST_AUTHORING_TURNS), console, label + ' / Generation')
+                    max_turns, console, label + ' / Generation')
                 entry['generation_turns'] = agent['turns']
             result = checks.tests([path])
             entry["result"] = result
@@ -164,7 +158,7 @@ def run_independent_acceptance(input_dir, arc_dir, schema, backend, ui, design, 
                 checkpoint(output, stage="10", task=rid, action="Record independent acceptance before test review",
                     status="FAILED", details={"test_path": path, "checks": result})
                 review = run_file_agent(model, REVIEW_INSTRUCTIONS, task, workspace, compile_suite,
-                    min(max_turns, TEST_REVIEW_TURNS), console, label + ' / Test review', feedback=result)
+                    max_turns, console, label + ' / Test review', feedback=result)
                 entry['review_turns'] = review['turns']
                 result = checks.tests([path])
                 entry["result"] = result

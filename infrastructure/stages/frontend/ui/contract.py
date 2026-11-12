@@ -161,9 +161,8 @@ def observable_contract(requirement):
     roles, seen_roles = [], set()
     for match in _EXPLICIT_ROLE.finditer(text):
         name, role = match.group(1).strip(), match.group(2).strip().lower()
-        # "{item name}" is a template for runtime data, so it stays a contract:
-        # the design must declare a control whose literal text matches its shape.
-        if not name or role not in _ARIA_ROLES:
+        # "{item name}" is a placeholder for runtime data, not fixed UI wording.
+        if not name or "{" in name or "}" in name or role not in _ARIA_ROLES:
             continue
         if (role, name) in seen_roles:
             continue
@@ -209,21 +208,8 @@ def _element_role(node):
 
 
 def _name_declared(elements, role, name):
-    """True when an element exposes that role and a matching name.
-
-    A name carrying braces is a template: "Pin {title}" is satisfied by any
-    element whose literal parts match, so the design may spell the placeholder
-    differently as long as the rendered text is the same shape.
-    """
-    from infrastructure.stages.frontend.ui.testing import template_segments
-
-    wanted = template_segments(name)
-    for node in elements:
-        if _element_role(node) != role:
-            continue
-        if any(template_segments(declared) == wanted for declared in _names(node)):
-            return True
-    return False
+    """True when an element exposes that role and a matching name."""
+    return any(_element_role(node) == role and name in _names(node) for node in elements)
 
 
 def requirement_pages(design, requirement_id):

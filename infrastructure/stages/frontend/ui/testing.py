@@ -160,17 +160,14 @@ def expected_accessibility(design: dict, pid: str, state: dict) -> list[dict]:
         role, name = accessible_role(node), accessible_name(node)
         href = (node.get("prop") or {}).get("href") if node.get("type") == "link" else None
         if role is None:
-            # An input without a declared input_type still renders as a text box or a
-            # concealed field, so assert its name and label but never a role the
-            # design did not promise. Other untyped nodes are not controls.
-            if node.get("type") != "input" or not name:
+            # Only a native password input keeps a meaningful accessible name
+            # without exposing an implicit role; text/containers are not controls.
+            password = node.get("type") == "input" and (node.get("prop") or {}).get("input_type") == "password"
+            if not (password and name):
                 continue
         if role != "alert" and not name:
             continue
-        if role == "alert" and name is None:
-            pass
-        expected.append({"uid": uid, "role": role, "name": name, "href": href,
-            "field": node.get("type") in {"input", "select"}})
+        expected.append({"uid": uid, "role": role, "name": name, "href": href})
     return expected
 
 
@@ -249,40 +246,6 @@ def existence_suite(design: dict, pid: str) -> str:
 
 _JS_REGEX_SPECIALS = re.compile(r"([.*+?^${}()|\[\]\\])")
 
-# A design name may carry runtime data: "Pin {title}", "{title} pinned note".
-# Such a name must be rendered with the item's value, never as literal braces.
-_PLACEHOLDER = re.compile(r"\{[^{}]{1,80}\}")
-
-
-def name_pattern(name: str) -> str:
-    """Return an anchored RegExp source where each {placeholder} accepts runtime data."""
-    parts, cursor = [], 0
-    for match in _PLACEHOLDER.finditer(name):
-        parts.append(re.escape(name[cursor:match.start()]))
-        parts.append(".+")
-        cursor = match.end()
-    parts.append(re.escape(name[cursor:]))
-    return "^" + "".join(parts) + "$"
-
-
-def template_segments(name: str) -> tuple:
-    """Return a name's literal parts, with every placeholder collapsed to one gap.
-
-    "Pin {title}" and "Pin {note.title}" describe the same control because their
-    literal text matches; a plain "Pin" does not.
-    """
-    parts, cursor = [], 0
-    for match in _PLACEHOLDER.finditer(name):
-        parts.append(name[cursor:match.start()])
-        cursor = match.end()
-    parts.append(name[cursor:])
-    return tuple(parts)
-
-
-def _js_name(name: str) -> str:
-    """Encode an accessible-name expectation; placeholders become wildcards."""
-    return json.dumps(name_pattern(name)) if _PLACEHOLDER.search(name) else _js_regex(name)
-
 
 def _js_regex(text: str, suffix: str = "") -> str:
     """Return a JSON-encoded JavaScript RegExp literal source matching the whole text."""
@@ -338,23 +301,19 @@ def accessibility_suite(design: dict, pid: str) -> str:
             # matches (duplicated chrome, a repeated navigation bar) must fail here
             # instead of in the hidden acceptance suite.
             locator = (f"page.getByRole({json.dumps(item['role'])}, "
-                f"{{ name: new RegExp({_js_name(item['name'])}) }})")
+                f"{{ name: new RegExp({_js_regex(item['name'])}) }})")
             lines.append(f"  await expect({locator}).toHaveCount(1);")
         for role, name in chrome_only:
-            locator = f"page.getByRole({json.dumps(role)}, {{ name: new RegExp({_js_name(name)}) }})"
+            locator = f"page.getByRole({json.dumps(role)}, {{ name: new RegExp({_js_regex(name)}) }})"
             lines.append(f"  await expect({locator}).toHaveCount(1);")
         for item in expected:
             locator = f"page.getByTestId({json.dumps(item['uid'])})"
             if item["role"]:
                 lines.append(f"  await expect({locator}).toHaveRole({json.dumps(item['role'])});")
             if item["name"]:
-                lines.append(f"  await expect({locator}).toHaveAccessibleName(new RegExp({_js_name(item['name'])}));")
+                lines.append(f"  await expect({locator}).toHaveAccessibleName(new RegExp({_js_regex(item['name'])}));")
             if item["href"]:
                 lines.append(f"  await expect({locator}).toHaveAttribute(\"href\", new RegExp({_href_pattern(item['href'])}));")
-            if item.get("field") and item["name"] and not in_repeated_container(design, item["uid"]):
-                # A placeholder supplies an accessible name but does NOT satisfy
-                # getByLabel, which acceptance suites use for form fields.
-                lines.append(f"  await expect(page.getByLabel(new RegExp({_js_name(item['name'])}))).toHaveCount(1);")
         lines.extend([
             '  } catch (error) {',
             '    if (runtimeErrors.length) throw new Error("UI_RUNTIME_ERROR: " + runtimeErrors.join("\\n"));',

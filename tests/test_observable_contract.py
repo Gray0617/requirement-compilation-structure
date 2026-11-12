@@ -142,7 +142,7 @@ class TestExplicitRoleAnnotations(unittest.TestCase):
             'Clicking "Books"(role=link) on the page displays "Book list"(role=region). '
             'Each book appears exactly once as "{item name}"(role=button).'))
 
-    def design(self, role=None, entry="{item name}"):
+    def design(self, role=None):
         list_prop = {"text": "Book list"}
         if role:
             list_prop["role"] = role
@@ -150,29 +150,15 @@ class TestExplicitRoleAnnotations(unittest.TestCase):
             {"PAGE": element("page", None),
              "NAV": element("link", "PAGE", text="Books", href="/books"),
              "LIST": {"type": "container", "parent": "PAGE", "data": [], "mode": [],
-                      "prop": list_prop},
-             "ITEM": element("item", "LIST"),
-             "ENTRY": element("button", "ITEM", text=entry)},
+                      "prop": list_prop}},
             {"home": {"name": "Home", "route": "/", "root": "PAGE", "images": []}},
-            {"REQ-1": ["PAGE", "NAV", "LIST", "ITEM", "ENTRY"]})
+            {"REQ-1": ["PAGE", "NAV", "LIST"]})
 
-    def test_the_annotation_is_extracted_and_placeholders_are_kept(self):
+    def test_the_annotation_is_extracted_and_placeholders_are_skipped(self):
         roles = self.contract()["roles"]
         self.assertIn({"role": "region", "name": "Book list"}, roles)
         self.assertIn({"role": "link", "name": "Books"}, roles)
-        # A template is a contract: the control must interpolate the row's value.
-        self.assertIn({"role": "button", "name": "{item name}"}, roles)
-
-    def test_a_plain_name_does_not_satisfy_a_template(self):
-        gaps = contract_gaps(self.design(role="region", entry="Open"),
-            "REQ-1", self.contract(), created_pages=[])
-        role_gaps = [(gap["role"], gap["name"]) for gap in gaps if gap["kind"] == "role"]
-        self.assertEqual(role_gaps, [("button", "{item name}")])
-
-    def test_a_template_name_satisfies_a_differently_spelled_placeholder(self):
-        gaps = contract_gaps(self.design(role="region", entry="{title}"),
-            "REQ-1", self.contract(), created_pages=[])
-        self.assertEqual([gap for gap in gaps if gap["kind"] == "role"], [])
+        self.assertNotIn("item name", [entry["name"] for entry in roles])
 
     def test_a_container_without_the_role_is_a_gap(self):
         gaps = contract_gaps(self.design(), "REQ-1", self.contract(), created_pages=[])

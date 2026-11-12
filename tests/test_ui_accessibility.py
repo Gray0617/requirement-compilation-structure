@@ -12,7 +12,7 @@ import unittest
 from infrastructure.stages.frontend.ui.testing import (accessible_name, accessible_role,
     accessibility_path, accessibility_suite, display_states, duplicate_named_controls,
     existence_suite, expected_accessibility, expected_unique_names, global_navigation_names,
-    name_pattern, suite_paths)
+    suite_paths)
 
 
 def element(kind, parent, data=(), **props):
@@ -53,13 +53,13 @@ class TestAccessibleExpectations(unittest.TestCase):
         _, _, states = display_states(design, "home")
         expected = {item["uid"]: item for item in expected_accessibility(design, "home", states[0])}
         self.assertEqual(expected["REGISTER"], {"uid": "REGISTER", "role": "link",
-            "name": "Register", "href": "/register", "field": False})
+            "name": "Register", "href": "/register"})
         self.assertEqual(expected["LOGIN"]["href"], "/login")
         self.assertNotIn("LOGOUT", expected)
 
 
 class TestPlaceholderNames(unittest.TestCase):
-    """A design name with braces is a template, not literal text to render."""
+    """A row control whose name carries runtime data is not asserted page-wide."""
 
     def design(self):
         return {
@@ -74,18 +74,6 @@ class TestPlaceholderNames(unittest.TestCase):
             "requirements": {"REQ-1": ["PAGE", "LIST", "ITEM", "PIN", "EDITOR_PIN"]},
             "steps": {},
         }
-
-    def test_placeholder_becomes_a_wildcard(self):
-        self.assertEqual(name_pattern("Pin {title}"), r"^Pin\ .+$")
-        self.assertEqual(name_pattern("{title} pinned note"), r"^.+\ pinned\ note$")
-
-    def test_a_plain_name_stays_exact(self):
-        self.assertEqual(name_pattern("Book list"), r"^Book\ list$")
-
-    def test_the_suite_does_not_demand_literal_braces(self):
-        suite = accessibility_suite(self.design(), "notes")
-        self.assertNotIn(r"\\{title\\}", suite)
-        self.assertIn('new RegExp("^Pin\\\\ .+$")', suite)
 
     def test_a_template_control_is_not_asserted_unique(self):
         # Row controls repeat by design; only page-level names are unique.

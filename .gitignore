@@ -5,7 +5,9 @@ outputs/
 output/
 slides/
 docs/
+*.pptx
 /scripts/*
 !/scripts/package.py
 
 AGENTS.md
+
