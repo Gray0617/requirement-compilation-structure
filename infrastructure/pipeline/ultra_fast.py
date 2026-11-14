@@ -67,6 +67,13 @@ This is a self-contained web application. Follow these rules:
   label such as "Book list" is an additional named region; it must not replace
   the page heading. After navigation, cancel and delete actions return to that
   page and its heading must be visible.
+- A required region or section must remain visible when it is empty: render a
+  visible empty-state message inside it (for example "No notes in Trash"). An
+  empty container has no layout box and is treated as hidden by automated checks.
+- Suggestion, autocomplete, menu and dialog overlays must not intercept clicks on
+  navigation or unrelated controls. Hide suggestions when the query is empty and
+  close overlays on blur, navigation or Escape; do not keep a full-size invisible
+  overlay over the sidebar or page.
 - Use data-testid only as a supplement; the application must work through
   accessible roles and names.
 - Return complete file contents, never diffs or placeholders. Keep files under
@@ -277,11 +284,17 @@ def compile_ultra_fast(input_dir: Path, arc_dir: Path, output_dir: Path, pause: 
     os.environ.setdefault("FAST_MODEL_TIMEOUT_SECONDS",
         os.getenv("ULTRA_FAST_MODEL_TIMEOUT_SECONDS", "185"))
     model = TextModel()
-    report, files = _compile_single(model, requirements, output, arc_dir, console)
-    if report is not None:
-        return report
-    console.show("Ultra-fast | Switching to 4-leaf continuation groups",
-        "The single response either timed out or did not build. Existing files are preserved.")
+    single_char_limit = int(os.getenv("ULTRA_FAST_SINGLE_CHARS", "60000"))
+    files = {}
+    if len(requirements) <= single_char_limit:
+        report, files = _compile_single(model, requirements, output, arc_dir, console)
+        if report is not None:
+            return report
+        console.show("Ultra-fast | Switching to 4-leaf continuation groups",
+            "The single response either timed out or did not build. Existing files are preserved.")
+    else:
+        console.show("Ultra-fast | Large requirements; using 4-leaf continuation groups",
+            f"{len(tree.leaves)} leaves, {len(requirements):,} characters")
     return _compile_chunked(model, root, tree, nodes, requirements, output, arc_dir, console, files)
 
 
