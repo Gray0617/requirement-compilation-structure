@@ -6,6 +6,7 @@ accepted functional smoke scenarios in regression checks."""
 
 import json
 
+from infrastructure.shared.agent.budgets import fast_mode
 from infrastructure.shared.agent.files import editable_application_path
 from infrastructure.shared.agent.loop import run_file_agent
 from infrastructure.shared.agent.recovery import implementation_task, final_checks, complete_report
@@ -239,6 +240,9 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             if evidence["typecheck"]["returncode"]:
                 raise ValueError(evidence["typecheck"]["output"])
             if baseline_files:
+                # One baseline presence pass keeps a fast run from spending the
+                # rest of the budget on a placeholder application. If it fails,
+                # the existing bounded baseline repair runs before business work.
                 evidence["ui"] = ui_checks.tests(baseline_files)
                 require_green(evidence["ui"])
         except (ValueError, RuntimeError) as error:
@@ -286,6 +290,9 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
         targets = tids
         relative = test_path(rid, output)
         ui_files = existing_suites(output, pages)
+        if fast_mode():
+            # One presence pass is enough for the speed-first path.
+            ui_files = [path for path in ui_files if not path.endswith(".a11y.spec.ts")]
         called = {aid for trigger in context["triggers"].values() for aid in api_ids(trigger)}
         context["obligations"] = {tid: trigger_obligations(trigger, backend) for tid, trigger in context["triggers"].items()}
         context.update({"requirement": contexts[rid],
@@ -296,47 +303,59 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             "target_triggers": sorted(targets), "test_path": relative}
         save_json(arc_dir / "frontend_e2e.json", report)
         with implementation_task(output, report["requirements"][rid], console, "12 / " + rid):
-            regression_files = [test_path(key, output) for key in [*accepted, rid]]
+            regression_files = [path for path in
+                (test_path(key, output) for key in [*accepted, rid])
+                if (output / path).is_file()]
 
-            def generation_checks():
-                """Typecheck selected tests; test_gate also runs the real application."""
-                nonlocal relative, regression_files
-                relative = test_path(rid, output)
-                regression_files = [test_path(key, output) for key in [*accepted, rid]]
-                return checks.typecheck(regression_files, full_source=False)
+            if fast_mode():
+                report["requirements"][rid]["test_turns"] = 0
+                report["requirements"][rid]["test_path"] = relative
+                generated = {"typecheck": {"returncode": 0,
+                        "output": "Fast mode: test generation skipped"},
+                    "behavior": None, "status": "FAST"}
+            else:
+                def generation_checks():
+                    """Typecheck selected tests; test_gate also runs the real application."""
+                    nonlocal relative, regression_files
+                    relative = test_path(rid, output)
+                    regression_files = [path for path in
+                        (test_path(key, output) for key in [*accepted, rid])
+                        if (output / path).is_file()]
+                    return checks.typecheck(regression_files, full_source=False)
 
-            def test_gate():
-                """Compile the suite, then preserve real execution failures for implementation repair."""
-                compiled = generation_checks()
-                if compiled["returncode"]:
-                    raise ValueError(compiled["output"])
-                try:
-                    behavior = checks.tests([relative])
-                except (ValueError, RuntimeError) as error:
-                    behavior = {"returncode": 1, "output": str(error), "errors": [str(error)]}
-                return {"typecheck": compiled, "behavior": behavior, "status": test_run_status(behavior)}
+                def test_gate():
+                    """Compile the suite, then preserve real execution failures for implementation repair."""
+                    compiled = generation_checks()
+                    if compiled["returncode"]:
+                        raise ValueError(compiled["output"])
+                    try:
+                        behavior = checks.tests([relative])
+                    except (ValueError, RuntimeError) as error:
+                        behavior = {"returncode": 1, "output": str(error), "errors": [str(error)]}
+                    return {"typecheck": compiled, "behavior": behavior, "status": test_run_status(behavior)}
 
-            test_context = {**model_context(context), "schema": related_schema(schema, context["backend_apis"].values()), "test_path": relative if (output / relative).is_file() else None,
-                "max_tests": max_tests}
-            test_workspace = selection.workspace(target=("e2e_test", rid), existing=relative,
-                references=["frontend/src/ui-runtime.ts", CONFIG, FIXTURE, "backend/tests/support/context.ts",
-                    *selection.paths("page", pages), *APPLICATION_ENTRYPOINTS,
-                    "frontend/package.json", "frontend/tsconfig.json",
-                    *backend_selection.paths("api", called),
-                    *[f"backend/src/db/tables/{name}.sql" for name in related_schema(schema, context["backend_apis"].values())]])
-            agent, generation_feedback = None, None
-            if (output / relative).is_file():
-                try:
-                    agent = {"turns": 0, "checks": test_gate()}
-                except (ValueError, RuntimeError) as error:
-                    generation_feedback = getattr(error, "feedback", {"error": str(error)})
-            if agent is None:
-                agent = run_file_agent(model, TEST_INSTRUCTIONS, test_context,
-                    test_workspace, test_gate, max_turns, console, label + " / Test Generation",
-                    feedback=generation_feedback,
-                    feedback_filter=lambda value: selection.feedback(test_workspace, value), context_index=context_index)
-            report["requirements"][rid]["test_turns"] = agent["turns"]
-            report["requirements"][rid]["test_path"] = relative
+                test_context = {**model_context(context), "schema": related_schema(schema, context["backend_apis"].values()), "test_path": relative if (output / relative).is_file() else None,
+                    "max_tests": max_tests}
+                test_workspace = selection.workspace(target=("e2e_test", rid), existing=relative,
+                    references=["frontend/src/ui-runtime.ts", CONFIG, FIXTURE, "backend/tests/support/context.ts",
+                        *selection.paths("page", pages), *APPLICATION_ENTRYPOINTS,
+                        "frontend/package.json", "frontend/tsconfig.json",
+                        *backend_selection.paths("api", called),
+                        *[f"backend/src/db/tables/{name}.sql" for name in related_schema(schema, context["backend_apis"].values())]])
+                agent, generation_feedback = None, None
+                if (output / relative).is_file():
+                    try:
+                        agent = {"turns": 0, "checks": test_gate()}
+                    except (ValueError, RuntimeError) as error:
+                        generation_feedback = getattr(error, "feedback", {"error": str(error)})
+                if agent is None:
+                    agent = run_file_agent(model, TEST_INSTRUCTIONS, test_context,
+                        test_workspace, test_gate, max_turns, console, label + " / Test Generation",
+                        feedback=generation_feedback,
+                        feedback_filter=lambda value: selection.feedback(test_workspace, value), context_index=context_index)
+                report["requirements"][rid]["test_turns"] = agent["turns"]
+                report["requirements"][rid]["test_path"] = relative
+                generated = agent["checks"]
 
             workspace = None
 
@@ -345,6 +364,8 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
                 compiled = checks.typecheck(regression_files)
                 result = {"typecheck": compiled, "e2e": None}
                 if compiled["returncode"]:
+                    return result
+                if fast_mode():
                     return result
                 if workspace and any(path.startswith(("backend/src/", "backend/tests/")) for path in workspace.changed_paths):
                     api_checks = BackendChecks(output)
@@ -369,6 +390,10 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
                     for kind in ("typecheck", "backend_typecheck"):
                         if result.get(kind) and result[kind]["returncode"]:
                             raise ValueError(result[kind]["output"])
+                    if fast_mode():
+                        if workspace is not None and not workspace.changed_paths:
+                            raise ValueError("Implement the requirement's interactions in application sources")
+                        return result
                     if "backend_tests" in result:
                         require_backend_green(result["backend_tests"])
                     if test_run_status(result["e2e"]) != "GREEN":
@@ -379,8 +404,11 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
                     raise TriggerCheckFailure("Functional integration or compilation failed", result) from error
                 return result
 
-            generated = agent["checks"]
-            current = {"typecheck": generated["typecheck"], "e2e": generated["behavior"]}
+            current = ({"error": "Implement this requirement's interactions in application sources; "
+                    "functional smoke tests are disabled in fast mode.",
+                    "typecheck": generated["typecheck"], "e2e": None}
+                if fast_mode() else
+                {"typecheck": generated["typecheck"], "e2e": generated["behavior"]})
             report["requirements"][rid]["status"] = generated["status"]
             save_json(arc_dir / "frontend_e2e.json", report)
             checkpoint(output, stage="10", task=rid, action="Publish functional smoke tests before implementation",
@@ -413,11 +441,12 @@ def run_trigger_tdd(arc_dir, tree, schema, backend, ui, design, images, contexts
             accepted.append(rid)
             reused = tids & implemented
             implemented.update(targets)
-            result = agent["checks"]["e2e"]
+            result = agent["checks"].get("e2e") or {"passed": 0, "failed": 0,
+                "output": "TypeScript acceptance (fast mode)"}
             report["requirements"][rid].update({"status": "GREEN", "implementation_turns": agent["turns"],
-                "steps": list(steps), "passed": result["passed"], "reused_triggers": sorted(reused)})
+                "steps": list(steps), "passed": result.get("passed", 0), "reused_triggers": sorted(reused)})
             save_json(arc_dir / "frontend_e2e.json", report)
-            console.show(label + " | GREEN", result["output"])
+            console.show(label + " | GREEN", result.get("output", "TypeScript acceptance (fast mode)"))
         save_json(arc_dir / "frontend_e2e.json", report)
     return verify_frontend(arc_dir, tree, backend, ui, console, report)
 
@@ -432,6 +461,8 @@ def verify_frontend(arc_dir, tree, backend, ui, console, report):
         if report["requirements"].get(rid, {}).get("status") != "NO_TRIGGERS"
         and (output / test_path(rid, output)).is_file()]
     ui_files = existing_suites(output, ui["pages"])
+    if fast_mode():
+        ui_files = [path for path in ui_files if not path.endswith(".a11y.spec.ts")]
     api_checks = BackendChecks(output)
     api_files = [path for aid in backend["apis"]
         if (path := selected_path(output, "backend_test", aid)) and (output / path).is_file()]

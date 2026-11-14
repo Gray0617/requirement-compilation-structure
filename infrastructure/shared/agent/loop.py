@@ -3,6 +3,7 @@
 import json
 import re
 
+from infrastructure.shared.agent.budgets import clamp_turns
 from infrastructure.shared.agent.discovery import DISCOVERY_RULES, DiscoverySession
 from infrastructure.shared.agent.conventions import task_conventions
 
@@ -32,9 +33,30 @@ class AgentExhausted(ValueError):
         self.feedback = feedback
 
 
+# The model's own diagnosis and the rejected response change every round even
+# when the underlying compiler failure is identical. They must not mask a
+# non-converging repair, or the same TypeScript error can consume the whole turn
+# budget. Only the actual rejection evidence participates in the fingerprint.
+_FINGERPRINT_VOLATILE_KEYS = frozenset({
+    "previous_diagnosis", "previous_response", "invalid_response", "correction",
+    "diagnosis", "turn", "turns", "round", "elapsed", "elapsed_seconds",
+    "duration", "timestamp", "created_at",
+})
+
+
+def _fingerprint_input(value):
+    """Remove round-to-round metadata before serialising rejection evidence."""
+    if isinstance(value, dict):
+        return {key: _fingerprint_input(child) for key, child in value.items()
+            if key not in _FINGERPRINT_VOLATILE_KEYS}
+    if isinstance(value, list):
+        return [_fingerprint_input(child) for child in value]
+    return value
+
+
 def failure_fingerprint(feedback) -> str:
     """Reduce one rejection to a stable key so repeats are recognisable."""
-    text = json.dumps(feedback, ensure_ascii=False, sort_keys=True, default=str)
+    text = json.dumps(_fingerprint_input(feedback), ensure_ascii=False, sort_keys=True, default=str)
     # The JSON text carries escaped newlines/tabs and escaped escape sequences.
     for escaped in ("\\n", "\\t", "\\r"):
         text = text.replace(escaped, " ")
@@ -52,6 +74,7 @@ def run_file_agent(model, instructions: str, task: dict, files: FileTools, gate,
     The stage-owned feedback filter may add writable sources/read-only references
     and condense check reports. It cannot change the acceptance gate or its result.
     """
+    max_turns = clamp_turns(max_turns)
     if max_turns < 1:
         raise ValueError("--max-turns must be positive")
     index = context_index if allow_discovery else None

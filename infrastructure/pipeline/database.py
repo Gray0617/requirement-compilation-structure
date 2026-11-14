@@ -3,7 +3,9 @@
 import json
 from pathlib import Path
 
+from infrastructure.shared.agent.budgets import fast_mode
 from infrastructure.stages.database.order import implementation_groups, table_dependencies
+from infrastructure.stages.database.prebuilt import render_table_sql
 from infrastructure.stages.database.runtime import initializer_source
 from infrastructure.shared.models.text import TextModel
 from infrastructure.utils.presentation.console import DemoConsole
@@ -75,6 +77,15 @@ def implement_db(arc_dir: Path, pause: bool = False, max_attempts: int = 10, max
         for name in group:
             with failures.task(name):
                 entity = schema["entities"][name]
+                if fast_mode():
+                    # The schema is already typed; lowering it to SQL is mechanical.
+                    expected_path = f"backend/src/db/tables/{name}.sql"
+                    content = render_table_sql(name, entity)
+                    save_text(output_dir / expected_path, content)
+                    implementations[name] = {"path": expected_path, "content": content}
+                    console.show(f"{len(implementations)}/{len(order)} {name} | deterministic DDL",
+                        f"{output_dir / expected_path}\n\n{content}")
+                    continue
                 label = f"{len(implementations) + 1}/{len(order)} {name}"
                 cycle = len(group) > 1 or name in dependencies[name]
                 console.show(f"{label} | 1. Table and dependency plan", (

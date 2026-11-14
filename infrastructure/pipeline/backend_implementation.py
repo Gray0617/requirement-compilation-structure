@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+from infrastructure.shared.agent.budgets import skip_generated_tests
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.project.entrypoints import selected_path
@@ -179,44 +180,56 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
                     relative = targets[aid]
                     label = f"{rid} / {aid} (uses: {', '.join(api_owners)})"
                     console.show(f"{label} | Test Generation: P / Q / R / W", json.dumps(api, ensure_ascii=False, indent=2))
-
-                    def test_gate(aid=aid):
-                        chosen = selected_path(output, "backend_test", aid) or relative
-                        targets[aid] = chosen
-                        files_by_api[aid] = [chosen]
-                        generation_files = [targets[key] for key in [*accepted, aid]]
-                        compiled = checks.typecheck(generation_files)
-                        if compiled["returncode"]:
-                            raise ValueError(f"Test TypeScript compilation failed: {compiled['output']}")
-                        if accepted:
-                            require_green(checks.tests([targets[key] for key in accepted]))
-                        result = checks.tests(files_by_api[aid])
-                        status = test_run_status(result)
-                        if status == "RED_CONFIRMED":
-                            report["red"][aid] = {key: result[key] for key in ("tests", "pass", "fail")}
-                        entry["test_status"] = status
-                        console.show(f"{aid} | HTTP tests: {status}", result["output"])
+                    if skip_generated_tests():
+                        # Direct implementation is much cheaper than authoring a
+                        # model-written HTTP suite first. An existing accepted
+                        # suite still runs as regression below.
+                        existing = selected_path(output, "backend_test", aid)
+                        relative = existing if existing and (output / existing).is_file() else ""
+                        targets[aid] = relative
+                        files_by_api[aid] = [relative] if relative else []
+                        agent = {"turns": 0, "checks": {"typecheck": None, "tests": None}}
+                        entry["test_status"] = "SKIPPED_FAST"
+                        report["agents"][f"tests:{aid}"] = {"turns": 0}
                         save_json(arc_dir / "backend_tdd.json", report)
-                        checkpoint(output, stage="06", task=aid, action="Run HTTP tests before implementation",
-                            status=status, details={"test_path": chosen, "checks": result})
-                        return {"typecheck": compiled, "tests": result, "status": status}
+                    else:
+                        def test_gate(aid=aid):
+                            chosen = selected_path(output, "backend_test", aid) or relative
+                            targets[aid] = chosen
+                            files_by_api[aid] = [chosen]
+                            generation_files = [targets[key] for key in [*accepted, aid]]
+                            compiled = checks.typecheck(generation_files)
+                            if compiled["returncode"]:
+                                raise ValueError(f"Test TypeScript compilation failed: {compiled['output']}")
+                            if accepted:
+                                require_green(checks.tests([targets[key] for key in accepted]))
+                            result = checks.tests(files_by_api[aid])
+                            status = test_run_status(result)
+                            if status == "RED_CONFIRMED":
+                                report["red"][aid] = {key: result[key] for key in ("tests", "pass", "fail")}
+                            entry["test_status"] = status
+                            console.show(f"{aid} | HTTP tests: {status}", result["output"])
+                            save_json(arc_dir / "backend_tdd.json", report)
+                            checkpoint(output, stage="06", task=aid, action="Run HTTP tests before implementation",
+                                status=status, details={"test_path": chosen, "checks": result})
+                            return {"typecheck": compiled, "tests": result, "status": status}
 
-                    context = {
-                        "api_id": aid, "api": api,
-                        "requirement": requirement_context(tree, rid),
-                        "db_schema": related_schema(schema, [api]), "test_path": relative if (output / relative).is_file() else None,
-                        "max_tests": max_tests,
-                        "support_module": TEST_SUPPORT_PATH,
-                    }
-                    workspace = selection.workspace(target=("backend_test", aid), existing=relative,
-                        references=[*supplied_sources(output, api, schema)])
-                    agent = run_file_agent(model, TEST_INSTRUCTIONS, context, workspace,
-                        test_gate, max_turns, console, label + " / Test Generation",
-                        feedback_filter=lambda value: selection.feedback(workspace, value), context_index=context_index)
-                    for owner in api_owners:
-                        report["tests"].setdefault(owner, {})[aid] = targets[aid]
-                    report["agents"][f"tests:{aid}"] = {"turns": agent["turns"]}
-                    save_json(arc_dir / "backend_tdd.json", report)
+                        context = {
+                            "api_id": aid, "api": api,
+                            "requirement": requirement_context(tree, rid),
+                            "db_schema": related_schema(schema, [api]), "test_path": relative if (output / relative).is_file() else None,
+                            "max_tests": max_tests,
+                            "support_module": TEST_SUPPORT_PATH,
+                        }
+                        workspace = selection.workspace(target=("backend_test", aid), existing=relative,
+                            references=[*supplied_sources(output, api, schema)])
+                        agent = run_file_agent(model, TEST_INSTRUCTIONS, context, workspace,
+                            test_gate, max_turns, console, label + " / Test Generation",
+                            feedback_filter=lambda value: selection.feedback(workspace, value), context_index=context_index)
+                        for owner in api_owners:
+                            report["tests"].setdefault(owner, {})[aid] = targets[aid]
+                        report["agents"][f"tests:{aid}"] = {"turns": agent["turns"]}
+                        save_json(arc_dir / "backend_tdd.json", report)
                     entry["status"] = "IMPLEMENTING"
                     api = contracts["apis"][aid]
                     console.show(f"{aid} | Implementation context", (
@@ -224,24 +237,33 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
                         + "\nContract tests: " + ", ".join(files_by_api[aid])
                         + "\nAPI may directly operate the database; no further Primitive decomposition."
                     ))
-                    regression_files = [relative for key in [*accepted, aid] for relative in files_by_api[key]]
+                    regression_files = [path for key in [*accepted, aid]
+                        for path in files_by_api.get(key, []) if path and (output / path).is_file()]
 
                     def implementation_checks():
                         compiled = checks.typecheck(regression_files)
                         if compiled["returncode"]:
                             return {"typecheck": compiled, "tests": None}
+                        if skip_generated_tests() or not regression_files:
+                            return {"typecheck": compiled, "tests": None}
                         tested = checks.tests(regression_files)
                         return {"typecheck": compiled, "tests": tested}
 
                     def implementation_gate():
+                        target = selected_path(output, "api", aid)
+                        if not target or not (output / target).is_file():
+                            raise ValueError("Create the API implementation file before acceptance")
                         result = implementation_checks()
                         if result["typecheck"]["returncode"]:
                             raise ValueError(result["typecheck"]["output"])
-                        require_green(result["tests"])
+                        if result["tests"] is not None:
+                            require_green(result["tests"])
                         return result
 
                     api_entry = selected_path(output, "api", aid)
-                    current = implementation_checks() if api_entry and (output / api_entry).is_file() else agent["checks"]
+                    current = (implementation_checks() if api_entry and (output / api_entry).is_file()
+                        else {"error": "Create the API implementation and register its route.",
+                            "typecheck": None, "tests": None})
                     context = {
                         "api_id": aid, "api": api, "db_schema": related_schema(schema, [api]),
                         "requirement": requirement_context(tree, rid),
@@ -255,17 +277,19 @@ def implement_backend_tdd(arc_dir: Path, pause: bool = False, max_turns: int = 1
                         implementation_gate, max_turns, console, aid + " / Implementation", feedback=current,
                         feedback_filter=lambda value: selection.feedback(workspace, value), context_index=context_index)
                     accepted.append(aid)
-                    result = agent["checks"]["tests"]
-                    report["green"][aid] = {key: result[key] for key in ("tests", "pass", "fail")}
+                    result = agent["checks"].get("tests") or {"tests": 0, "pass": 0, "fail": 0}
+                    report["green"][aid] = {key: result.get(key, 0) for key in ("tests", "pass", "fail")}
                     report["agents"][f"implementation:{aid}"] = {"turns": agent["turns"]}
                     save_json(arc_dir / "backend_tdd.json", report)
-                    console.show(f"{aid} | GREEN: contract and regression tests pass", result["output"])
+                    console.show(f"{aid} | GREEN: implementation accepted",
+                        result.get("output", "TypeScript acceptance (fast mode)"))
                     entry["status"] = "GREEN"
                 save_json(arc_dir / "backend_tdd.json", report)
             report["requirements"][rid]["status"] = "GREEN" if all(aid in accepted for aid in ids) else "FAILED"
             save_json(arc_dir / "backend_tdd.json", report)
             console.show(f"{requirement_label} | " + report["requirements"][rid]["status"], "Proceed to the next requirement; failed APIs remain recorded.")
-        all_files = [targets[aid] for aid in accepted]
+        all_files = [path for aid in accepted for path in files_by_api.get(aid, [])
+            if path and (output / path).is_file()]
         console.show("Final regression | All requirements complete", "Compile the full backend and run all canonical API suites.")
         verification = final_checks(console,
             typecheck=(checks.typecheck, None),

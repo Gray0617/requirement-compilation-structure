@@ -7,6 +7,7 @@ from time import sleep
 
 from dotenv import load_dotenv
 from openai import OpenAI, OpenAIError
+from infrastructure.shared.agent.budgets import fast_mode, model_timeout_seconds
 from infrastructure.utils.presentation.model_io import http_client, invoke
 
 
@@ -103,10 +104,11 @@ class TextModel:
         self._reasoning_supported = True
         self.json_mode = json_mode
         self._token_parameter = "max_completion_tokens"
+        self.attempts = 1 if fast_mode() else MODEL_ATTEMPTS
         self.client = OpenAI(
             api_key=api_key,
             base_url=os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
-            timeout=600, max_retries=2,
+            timeout=model_timeout_seconds(), max_retries=0 if fast_mode() else 2,
             http_client=http_client(),
         )
 
@@ -135,20 +137,21 @@ class TextModel:
     def _request(self, **arguments):
         """Retry transient provider failures, then report a bounded unavailability."""
         delay = BACKOFF_SECONDS
-        for attempt in range(1, MODEL_ATTEMPTS + 1):
+        attempts = getattr(self, "attempts", MODEL_ATTEMPTS)
+        for attempt in range(1, attempts + 1):
             try:
                 return self._request_once(**arguments)
             except OpenAIError as error:
                 if not transient_failure(error):
                     raise
-                if attempt >= MODEL_ATTEMPTS:
+                if attempt >= attempts:
                     raise ModelUnavailable(
-                        f"provider unavailable after {MODEL_ATTEMPTS} attempts: {error}") from error
+                        f"provider unavailable after {attempts} attempts: {error}") from error
                 print(f"[model] transient provider failure ({type(error).__name__}: {error}); "
-                    f"retry {attempt}/{MODEL_ATTEMPTS} in {delay:.1f}s", flush=True)
+                    f"retry {attempt}/{attempts} in {delay:.1f}s", flush=True)
                 sleep(delay)
                 delay *= 2
-        raise ModelUnavailable(f"provider unavailable after {MODEL_ATTEMPTS} attempts")
+        raise ModelUnavailable(f"provider unavailable after {attempts} attempts")
 
     def generate_file_json(self, instructions: str, payload: dict) -> dict:
         """Request one edit-round response without long hidden reasoning.
@@ -160,7 +163,8 @@ class TextModel:
         return self.generate_json(instructions, payload,
             reasoning=getattr(self, "file_reasoning", "none"))
 
-    def generate_json(self, instructions: str, payload: dict, reasoning: str | None = None) -> dict:
+    def generate_json(self, instructions: str, payload: dict, reasoning: str | None = None,
+            temperature: float | None = None) -> dict:
         """Request JSON using the stage prompt and serialized task data."""
         mode = reasoning or getattr(self, "reasoning", "low")
         try:
@@ -171,6 +175,7 @@ class TextModel:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 **({"response_format": {"type": "json_object"}} if getattr(self, "json_mode", True) else {}),
+                **({"temperature": temperature} if temperature is not None else {}),
                 **reasoning_arguments(self.name, mode),
             )
         except OpenAIError as error:

@@ -45,7 +45,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stage", choices=[name for name, _, _ in PIPELINE], metavar="STAGE",
         help="Run one stage by its full name (e.g. 06_implement_backend_tdd); omit for the full pipeline")
     parser.add_argument("--pause", action="store_true", help="Wait for Enter after each display stage")
+    parser.add_argument("--fast", action="store_true",
+        help="Speed-first mode: fewer rounds, no generated tests or independent acceptance")
+    parser.add_argument("--quality", action="store_true",
+        help="Full verification mode; disables the speed-first shortcuts")
+    parser.add_argument("--ultra-fast", action="store_true",
+        help="One-shot generation for small tasks; skips staged design and local tests")
     args = parser.parse_args(argv)
+    if sum((args.fast, args.quality, args.ultra_fast)) > 1:
+        parser.error("Choose only one of --fast, --ultra-fast or --quality")
+    if args.ultra_fast:
+        os.environ["FAST_MODE"] = "1"
+        os.environ["ULTRA_FAST"] = "1"
+    elif args.fast:
+        os.environ["FAST_MODE"] = "1"
+    elif args.quality:
+        os.environ["FAST_MODE"] = "0"
+        os.environ["ULTRA_FAST"] = "0"
     args.requirement_path = platform_default(args.requirement_path,
         "ARCBENCH_TASK_DIR", "ARCBENCH_REQUIREMENT_DIR")
     args.output_dir = platform_default(args.output_dir, "ARCBENCH_OUTPUT_DIR", "ARCBENCH_PROJECT_DIR")

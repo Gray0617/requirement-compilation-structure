@@ -2,6 +2,7 @@
 
 import json
 
+from infrastructure.shared.agent.budgets import clamp_attempts
 from infrastructure.shared.agent.discovery import DISCOVERY_RULES, DiscoverySession
 from infrastructure.shared.project.git import checkpoint
 
@@ -38,6 +39,7 @@ def response_feedback(error, response):
 
 def propose_json(model, instructions, request, accept, console, label, max_attempts=10, context_index=None):
     """Generate and repair a proposal within a finite total model-call budget."""
+    max_attempts = clamp_attempts(max_attempts)
     if max_attempts < 1:
         raise ValueError("--max-attempts must be positive")
     request = dict(request)

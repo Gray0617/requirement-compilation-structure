@@ -14,6 +14,7 @@ from infrastructure.pipeline.ui_design import design_frontend_ui
 from infrastructure.pipeline.ui_implementation import implement_frontend_ui
 from infrastructure.pipeline.frontend_triggers import design_frontend_triggers
 from infrastructure.pipeline.frontend_implementation import implement_frontend_triggers
+from infrastructure.pipeline.ultra_fast import compile_ultra_fast, should_ultra_fast
 from infrastructure.utils.presentation.console import show_panel
 from infrastructure.utils.presentation.logging import console_log
 from infrastructure.utils.files import save_json
@@ -86,6 +87,13 @@ class Compiler:
     def compile(self, stage: str | None = None) -> Path:
         """Execute every pass, or only the selected pass using existing artifacts."""
         passes = PIPELINE
+        if stage is None and should_ultra_fast(self.input_dir):
+            # Small tasks: one file-map generation call instead of the full
+            # incremental design/test pipeline. Build errors get one repair.
+            passes = (
+                ("00_project_initialization", project_initialization, "project_files"),
+                ("ultra_fast", compile_ultra_fast, "ultra_fast"),
+            )
         if stage is not None:
             passes = ()
             for entry in PIPELINE:
@@ -101,6 +109,9 @@ class Compiler:
         for name, function, artifact in passes:
             if function is project_initialization:
                 result = self._run(name, function, self.output_dir, port=self.port, pause=self.pause)
+            elif function is compile_ultra_fast:
+                result = self._run(name, function, self.input_dir, self.arc_dir, self.output_dir,
+                    pause=self.pause)
             elif function in (explore_requirement, design_frontend_ui, implement_frontend_ui,
                     design_frontend_triggers, implement_frontend_triggers):
                 result = self._run(name, function, self.input_dir, self.arc_dir, pause=self.pause)

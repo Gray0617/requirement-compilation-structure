@@ -24,9 +24,31 @@ def workspace_path(root, path):
         current = current / part
         if current.is_symlink():
             raise FileToolError("INVALID_PATH", "Symlinks are not allowed", path)
-    if not current.resolve().is_relative_to(root.resolve()) or current.is_dir():
+    if not current.resolve().is_relative_to(root.resolve()):
         raise FileToolError("INVALID_PATH", "Use a file inside the working directory", path)
+    if current.is_dir():
+        raise FileToolError("PATH_IS_DIRECTORY",
+            "Path is a directory; read a specific file inside it", path)
     return current
+
+
+# The first implementation of the application must replace these small scaffold
+# stubs wholesale. Later replacements still obey incremental-compilation rules.
+_STUB_MARKERS = {
+    "frontend/src/App.tsx": ("The project is ready for requirement implementation.",),
+    "backend/src/api/register.ts": ("registerApis",),
+}
+_STUB_ROUTE_MARKERS = ("app.get(", "app.post(", "app.put(", "app.patch(", "app.delete(")
+
+
+def replaceable_stub(path, content):
+    """True only while a file is still the untouched compiler scaffold stub."""
+    markers = _STUB_MARKERS.get(path)
+    if not markers or not all(marker in content for marker in markers):
+        return False
+    if path == "backend/src/api/register.ts":
+        return not any(marker in content for marker in _STUB_ROUTE_MARKERS)
+    return True
 
 
 def read_file(files, path, start_line=1, end_line=None):
@@ -73,9 +95,10 @@ def edit_file(files, path, operation, new_content, old_content=""):
             if not old_content:
                 raise FileToolError("INVALID_ARGUMENTS", "replace requires nonempty exact old_content", path)
             if current.strip() and old_content.strip() == current.strip():
-                raise FileToolError("WHOLE_FILE_REPLACEMENT_NOT_ALLOWED",
-                    "Incremental compilation forbids replacing a whole existing file. "
-                    "Use a smaller unique span and preserve earlier requirements, registrations and state.", path)
+                if not replaceable_stub(path, current):
+                    raise FileToolError("WHOLE_FILE_REPLACEMENT_NOT_ALLOWED",
+                        "Incremental compilation forbids replacing a whole existing file. "
+                        "Use a smaller unique span and preserve earlier requirements, registrations and state.", path)
             first = current.find(old_content)
             count = 0 if first < 0 else (2 if current.find(old_content, first + 1) >= 0 else 1)
             if count != 1:

@@ -50,6 +50,20 @@ class Fingerprint(unittest.TestCase):
         self.assertNotEqual(failure_fingerprint({"error": "TS2345"}),
             failure_fingerprint({"error": "TS2451"}))
 
+    def test_round_metadata_does_not_hide_a_repeated_failure(self):
+        first = failure_fingerprint({"error": "TS2307: Cannot find module",
+            "previous_diagnosis": {"cause": "environment", "reason": "attempt 1"}})
+        second = failure_fingerprint({"error": "TS2307: Cannot find module",
+            "previous_diagnosis": {"cause": "environment", "reason": "attempt 7"}})
+        self.assertEqual(first, second)
+
+    def test_rejected_response_does_not_hide_a_repeated_failure(self):
+        first = failure_fingerprint({"error": "same compiler failure",
+            "previous_response": {"tool_calls": [{"path": "a.ts"}]}})
+        second = failure_fingerprint({"error": "same compiler failure",
+            "previous_response": {"tool_calls": [{"path": "b.ts"}]}})
+        self.assertEqual(first, second)
+
 
 class EarlyStop(unittest.TestCase):
     def run_agent(self, gate, max_turns=10):
@@ -62,6 +76,26 @@ class EarlyStop(unittest.TestCase):
     def test_identical_failures_stop_after_two_rounds(self):
         with self.assertRaises(AgentExhausted) as raised:
             self.run_agent(failing_gate("TS2345: 'string | null' is not assignable"))
+        self.assertEqual(raised.exception.turns, 2)
+        self.assertIn("no progress", str(raised.exception))
+
+    def test_changing_diagnosis_still_stops_on_repeated_failure(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        attempts = {"count": 0}
+
+        def generate(instructions, payload):
+            attempts["count"] += 1
+            return {"diagnosis": {"cause": "environment",
+                "reason": f"attempt {attempts['count']}"},
+                "tool_calls": [{"tool": "edit_file", "path": "page.tsx", "operation": "replace",
+                    "old_content": "() => null;", "new_content": "() => null; // attempt"}]}
+
+        with self.assertRaises(AgentExhausted) as raised:
+            run_file_agent(Mock(generate_json=Mock(side_effect=generate)), "", {},
+                workspace(root), failing_gate("TS2307: Cannot find module"),
+                10, Mock(), "Example")
         self.assertEqual(raised.exception.turns, 2)
         self.assertIn("no progress", str(raised.exception))
 

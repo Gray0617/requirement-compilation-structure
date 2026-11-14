@@ -2,10 +2,12 @@
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
 
+from infrastructure.shared.agent.budgets import fast_mode, parallel_workers
 from infrastructure.shared.models.vision import VisualModel
 from infrastructure.utils.presentation.console import DemoConsole
 from infrastructure.utils.files import save_json, save_text
@@ -292,9 +294,19 @@ def explore_requirement(input_dir: Path, arc_dir: Path, pause: bool = False) -> 
     analysis = {}
     if references:
         model = VisualModel()
-        for reference in references:
-            print(f"Analyzing image: {reference}", flush=True)
-            analysis[reference] = model.analyze(input_dir / reference)
+        if fast_mode() and len(references) > 1:
+            def analyze(reference):
+                print(f"Analyzing image: {reference}", flush=True)
+                return reference, model.analyze(input_dir / reference)
+            with ThreadPoolExecutor(max_workers=parallel_workers()) as pool:
+                results = list(pool.map(analyze, references))
+        else:
+            results = []
+            for reference in references:
+                print(f"Analyzing image: {reference}", flush=True)
+                results.append((reference, model.analyze(input_dir / reference)))
+        for reference, result in results:
+            analysis[reference] = result
             save_json(arc_dir / "visual_analysis.json", analysis)
             checkpoint(arc_dir.parent, stage="01", task=reference, action="Publish visual reference analysis",
                 details={"reference": reference, "analysis": analysis[reference]})

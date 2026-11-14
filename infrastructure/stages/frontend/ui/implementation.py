@@ -7,6 +7,7 @@ included in its checks. Application integration is model-owned; shared test tool
 import json
 from pathlib import Path
 
+from infrastructure.shared.agent.budgets import fast_mode
 from infrastructure.shared.agent.context import SourceFiles
 from infrastructure.shared.agent.discovery import project_index
 from infrastructure.shared.agent.loop import run_file_agent
@@ -128,6 +129,11 @@ def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_
             compiled = checks.typecheck(files)
             if compiled["returncode"]:
                 return {"typecheck": compiled, "tests": None}
+            if fast_mode():
+                # The full UI suite runs once at the end of the stage. Running
+                # existence and accessibility suites after every edit round was
+                # the dominant local cost in measured runs.
+                return {"typecheck": compiled, "tests": None, "fast": True}
             if not browser_ready:
                 return {"typecheck": compiled, "tests": None, "browser": "unavailable"}
             tested = checks.tests(files)
@@ -135,11 +141,14 @@ def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_
 
         def implementation_gate():
             """Accept the current page after compilation, and after presence tests when a browser exists."""
+            target = selected_path(output, "page", pid)
+            if fast_mode() and (not target or not (output / target).is_file()):
+                raise ValueError("Create the page implementation file before acceptance")
             result = implementation_checks()
             for kind in ("typecheck",):
                 if result[kind] and result[kind]["returncode"]:
                     raise ValueError(f"{kind} failed: {result[kind]['output']}")
-            if browser_ready:
+            if browser_ready and not fast_mode():
                 require_green(result["tests"])
             return result
 
@@ -179,8 +188,48 @@ def implement_ui(arc_dir: Path, design: dict, model, console, report: dict, max_
             save_json(arc_dir / "ui_checks.json", report)
             console.show(label + " | GREEN", checks_run.get("output", "TypeScript acceptance only (no browser)"))
         save_json(arc_dir / "ui_checks.json", report)
+    all_files = [suite for pid in design["pages"] for suite in suite_paths(pid)
+        if (output / suite).is_file()]
+    if fast_mode() and browser_ready and all_files:
+        # A fast page loop gates on TypeScript, so a page can compile yet omit a
+        # required control or accessible name. Run the compiler-owned suites
+        # once, and spend at most one bounded repair pass on their failures.
+        try:
+            initial = checks.tests(all_files)
+        except (ValueError, RuntimeError) as error:
+            initial = {"returncode": 1, "output": str(error), "errors": [str(error)]}
+        if initial.get("returncode") or initial.get("failed") or initial.get("errors"):
+            page_paths = [path for pid in design["pages"]
+                if (path := selected_path(output, "page", pid)) and (output / path).is_file()]
+            workspace = selection.workspace(
+                paths=[*APPLICATION_ENTRYPOINTS, *page_paths],
+                references=[*all_files, "frontend/src/ui-runtime.ts", "frontend/package.json",
+                    "frontend/tsconfig.json", "frontend/playwright.ui.config.ts"])
+
+            def repair_gate():
+                compiled = checks.typecheck(all_files)
+                if compiled["returncode"]:
+                    raise ValueError(compiled["output"])
+                tested = checks.tests(all_files)
+                require_green(tested)
+                return {"typecheck": compiled, "tests": tested}
+
+            try:
+                run_file_agent(model,
+                    "Repair the application so the compiler-owned UI presence and "
+                    "accessible-name suites pass. Preserve the existing routes, handlers "
+                    "and behavior. Add the missing controls or correct their roles/names; "
+                    "do not edit the suites. Read the supplied failure evidence first.",
+                    {"task": "ui_final_repair", "page_paths": {
+                        pid: selected_path(output, "page", pid) for pid in design["pages"]}},
+                    workspace, repair_gate, max_turns, console, "UI final repair",
+                    feedback=initial,
+                    feedback_filter=lambda value: selection.feedback(workspace, value),
+                    context_index=context_index)
+            except (ValueError, RuntimeError):
+                pass  # The final verification reports the remaining failure.
     console.show("UI final verification", "All page tasks were attempted. Run display regression and build, retaining any failures.")
-    files = [suite for pid in design["pages"] for suite in suite_paths(pid) if (output / suite).is_file()]
+    files = all_files
     if browser_ready:
         verification = final_checks(console,
             typecheck=(lambda: checks.typecheck(files), None),

@@ -77,10 +77,19 @@ try {
 FIXTURE_SOURCE = '''// Compiler-owned Given/observation fixture. When actions go through the browser.
 import { test as base, expect } from "@playwright/test";
 import type Database from "better-sqlite3";
+import { scryptSync } from "node:crypto";
 import { basename, dirname } from "node:path";
 import { createDatabaseClient } from "../../../../backend/src/db/client.js";
 import { initializeDatabase } from "../../../../backend/src/db/initialize.js";
-export { fixturePasswordHash } from "../../../../backend/tests/support/context.js";
+
+// Keep this fixture self-contained: backend/tests/support exists only when the
+// task generated backend API tests. Anonymous catalog tasks have no such file,
+// and their E2E suite must still compile and run.
+export function fixturePasswordHash(password: string): string {
+  const salt = "00112233445566778899aabbccddeeff";
+  const digest = scryptSync(password, Buffer.from(salt, "hex"), 64).toString("hex");
+  return `scrypt$${salt}$${digest}`;
+}
 export const test = base.extend<{ database: Database.Database; applicationErrors: void }>({
   database: [async ({}, use) => {
     const path = process.env.ARC_E2E_DB_FILE;

@@ -4,6 +4,21 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
+from functools import wraps
+
+
+# Parallel design/vision tasks may checkpoint concurrently; Git index/commit
+# operations are not safely re-entrant on one repository.
+_CHECKPOINT_LOCK = threading.RLock()
+
+
+def _serialized_checkpoint(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        with _CHECKPOINT_LOCK:
+            return function(*args, **kwargs)
+    return wrapper
 
 
 IGNORE_RULES = (
@@ -125,6 +140,7 @@ def initialize_repository(output):
         return None
 
 
+@_serialized_checkpoint
 def checkpoint(output=None, *, stage=None, task, action, status="GREEN", details=None):
     """Record a semantic step, including no-change checks, without hiding build failures."""
     from infrastructure.utils.presentation.logging import session_info
