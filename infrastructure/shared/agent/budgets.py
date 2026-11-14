@@ -56,7 +56,7 @@ def ultra_fast_mode(leaf_count: int | None = None) -> bool:
         return configured
     if not fast_mode():
         return False
-    return leaf_count is None or leaf_count <= _positive("ULTRA_FAST_MAX_LEAVES", 60)
+    return leaf_count is None or leaf_count <= _positive("ULTRA_FAST_MAX_LEAVES", 100)
 
 
 def skip_independent_acceptance() -> bool:

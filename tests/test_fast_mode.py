@@ -48,8 +48,8 @@ class FastModeFlags(unittest.TestCase):
     def test_ultra_fast_is_limited_to_small_tasks_unless_forced(self):
         with patch.dict(os.environ, {"FAST_MODE": "1"}, clear=True):
             self.assertTrue(ultra_fast_mode(6))
-            self.assertTrue(ultra_fast_mode(60))
-            self.assertFalse(ultra_fast_mode(61))
+            self.assertTrue(ultra_fast_mode(100))
+            self.assertFalse(ultra_fast_mode(101))
         with patch.dict(os.environ, {"FAST_MODE": "1", "ULTRA_FAST": "1"}, clear=True):
             self.assertTrue(ultra_fast_mode(31))
         with patch.dict(os.environ, {"FAST_MODE": "1", "ULTRA_FAST": "0"}, clear=True):
