@@ -9,6 +9,7 @@ extends the files produced by the previous group and is built independently.
 
 import json
 import os
+import re
 from pathlib import Path
 
 import yaml
@@ -67,17 +68,43 @@ This is a self-contained web application. Follow these rules:
   label such as "Book list" is an additional named region; it must not replace
   the page heading. After navigation, cancel and delete actions return to that
   page and its heading must be visible.
-- A required region or section must remain visible when it is empty: render a
-  visible empty-state message inside it (for example "No notes in Trash"). An
-  empty container has no layout box and is treated as hidden by automated checks.
-- Suggestion, autocomplete, menu and dialog overlays must not intercept clicks on
-  navigation or unrelated controls. Hide suggestions when the query is empty and
-  close overlays on blur, navigation or Escape; do not keep a full-size invisible
-  overlay over the sidebar or page.
 - Use data-testid only as a supplement; the application must work through
   accessible roles and names.
 - Return complete file contents, never diffs or placeholders. Keep files under
   frontend/src. Do not return main.tsx, ui-runtime.ts, package.json or backend files.
+"""
+
+REFINE_RULES = """
+
+This is a completeness pass over an existing, building application. Audit
+requirements_yaml against existing_files and implement every missing requirement,
+page, control, status, default and behavior. Preserve every existing route, state
+and behavior; return complete contents for files you change or add, and omit
+unchanged files. Do not replace the application with a new one.
+
+Pay particular attention to these cross-cutting rules:
+- required_placeholders lists every control the requirement explicitly annotates
+  as a textbox or searchbox. Set the HTML placeholder attribute to that exact
+  text for the corresponding control, even when it also has a visible label.
+  Tests may locate these controls by placeholder instead of by accessible name.
+- A required region or section must remain visible when it is empty: render a
+  visible empty-state message inside it. An empty container has no layout box and
+  is treated as hidden by automated checks.
+- Suggestion, autocomplete, menu and dialog overlays must not intercept clicks on
+  navigation or unrelated controls. Hide suggestions when the query is empty and
+  close overlays on blur, navigation or Escape.
+- Recently viewed or recently updated collections must track every content type
+  named by the requirement and update after each successful navigation, including
+  items created in the current session.
+- Persist recently viewed/updated state synchronously before the page is painted
+  (for example in a layout effect or directly in the navigation handler), so an
+  immediate full reload retains the visit.
+- Template names in the requirement, such as "Open {title}", "Archive {title}" or
+  "Highlight {keyword}", are contracts: render one instance per matching record
+  and interpolate that record's runtime value into the accessible name. Never
+  render literal braces and never replace the template with a static alias.
+- Preserve the exact role/name/heading rules from the task instructions for every
+  control, region, dialog, status and page you add.
 """
 
 PHASED_SUFFIX = """
@@ -267,6 +294,65 @@ def _compile_chunked(model, root, tree, nodes, requirements, output, arc_dir, co
     return report
 
 
+def _required_placeholders(text):
+    """Names explicitly declared as textboxes/searchboxes; tests may query them by placeholder."""
+    names = set()
+    for match in re.finditer(r'"([^"]{1,120})"\s*\(\s*role\s*=\s*(?:textbox|searchbox)\s*\)',
+            text, re.IGNORECASE):
+        name = match.group(1).strip()
+        if name and "{" not in name and "}" not in name:
+            names.add(name)
+    return sorted(names)
+
+
+def _source_files(output):
+    root = output / "frontend/src"
+    if not root.is_dir():
+        return {}
+    return {path.relative_to(output).as_posix(): read_source(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix in {".ts", ".tsx", ".css"}}
+
+
+def refine_application(model, requirements, output, arc_dir, console):
+    """One completeness pass over a building application; keep the base on failure."""
+    existing = _source_files(output)
+    payload = {"requirements_yaml": requirements, "existing_files": existing,
+        "file_contract": _contract(),
+        "required_placeholders": _required_placeholders(requirements)}
+    try:
+        files = _request_part(model, INSTRUCTIONS + REFINE_RULES, payload, require_app=False)
+    except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as error:
+        console.show("Ultra-fast | Refine unavailable; keeping base app", str(error)[:1000])
+        return {"status": "SKIPPED", "error": str(error)[:1000]}
+    if not files:
+        return {"status": "SKIPPED", "reason": "no files returned"}
+    _write(files, output)
+    console.show(f"Ultra-fast | Refine changed {len(files)} files",
+        "\n".join(sorted(files)))
+    build = _repair(model, output, arc_dir, {**existing, **files}, requirements, 1, 1, console)
+    if build["returncode"]:
+        # A refine pass must never leave a broken application behind.
+        for path, content in existing.items():
+            save_text(output / path, content)
+        for path in set(files) - set(existing):
+            (output / path).unlink(missing_ok=True)
+        _build(output)
+        console.show("Ultra-fast | Refine reverted", build["output"][-3000:])
+        return {"status": "REVERTED", "error": build["output"][-8000:]}
+    return {"status": "GREEN", "changed": sorted(files)}
+
+
+def _maybe_refine(model, requirements, output, arc_dir, console, report, leaf_count):
+    enabled = os.getenv("ULTRA_FAST_REFINE", "1").strip().lower() not in {"0", "false", "no", "off"}
+    if not enabled or leaf_count <= 8 or report.get("status") != "GREEN":
+        return report
+    result = refine_application(model, requirements, output, arc_dir, console)
+    report["refine"] = result
+    save_json(arc_dir / "ultra_fast.json", report)
+    return report
+
+
 def compile_ultra_fast(input_dir: Path, arc_dir: Path, output_dir: Path, pause: bool = False) -> dict:
     """Prefer one complete response; fall back to 4-leaf continuation groups."""
     source = input_dir / "requirements.yaml"
@@ -289,13 +375,15 @@ def compile_ultra_fast(input_dir: Path, arc_dir: Path, output_dir: Path, pause: 
     if len(requirements) <= single_char_limit:
         report, files = _compile_single(model, requirements, output, arc_dir, console)
         if report is not None:
-            return report
+            return _maybe_refine(model, requirements, output, arc_dir, console, report,
+                len(tree.leaves))
         console.show("Ultra-fast | Switching to 4-leaf continuation groups",
             "The single response either timed out or did not build. Existing files are preserved.")
     else:
         console.show("Ultra-fast | Large requirements; using 4-leaf continuation groups",
             f"{len(tree.leaves)} leaves, {len(requirements):,} characters")
-    return _compile_chunked(model, root, tree, nodes, requirements, output, arc_dir, console, files)
+    report = _compile_chunked(model, root, tree, nodes, requirements, output, arc_dir, console, files)
+    return _maybe_refine(model, requirements, output, arc_dir, console, report, len(tree.leaves))
 
 
 def should_ultra_fast(input_dir: Path) -> bool:
